@@ -252,6 +252,9 @@ StorNvmeInitialize(
 
     DPRINT1("StorNvmeInitialize(%p)\n", DeviceExtension);
 
+    /* We can unmask the interrupts now */
+    StorPortWriteRegisterUlong(Adapter, &Adapter->Registers->INTMC, 1);
+
     /* The controller was already started in HwFindAdapter */
     Adapter->InterruptsConnected = TRUE;
     Adapter->State = NvmeAdapterRunning;

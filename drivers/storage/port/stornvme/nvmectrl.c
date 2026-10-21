@@ -98,6 +98,11 @@ NvmpEnableController(
     StorPortWriteRegisterUlong(Adapter,
                                &Adapter->Registers->CC.AsUlong,
                                Config.AsUlong);
+    
+    /* Mask interrupts, so that Admin commands don't spam IRQs that storport doesn't yet route to us */
+    StorPortWriteRegisterUlong(Adapter,
+                               &Adapter->Registers->INTMS,
+                               1);
 
     Config.EN = 1;
     StorPortWriteRegisterUlong(Adapter,
