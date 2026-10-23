@@ -3,6 +3,7 @@
  * LICENSE:     MIT (https://spdx.org/licenses/MIT)
  * PURPOSE:     SCSI command translation
  * COPYRIGHT:   Copyright 2026 Justin Miller <justin.miller@reactos.org>
+ *              Copyright 2026 Natalia Cholewa <natanalt@proton.me>
  */
 
 /* INCLUDES *******************************************************************/
@@ -385,15 +386,38 @@ NvmpInquiryVpd(
 
         case VPD_BLOCK_LIMITS:
         {
-            /* Header only, there is no UNMAP support to describe */
-            Needed = 20;
-            if (Length < Needed)
+            PVPD_BLOCK_LIMITS_PAGE Page; 
+
+            if (Length < sizeof(VPD_BLOCK_LIMITS_PAGE))
                 break;
 
-            Buffer[1] = VPD_BLOCK_LIMITS;
-            Buffer[3] = (UCHAR)(Needed - 4);
+            Page = (PVPD_BLOCK_LIMITS_PAGE)Buffer;
+            Page->PageCode = VPD_BLOCK_LIMITS;
+            Page->PageLength[1] = sizeof(VPD_BLOCK_LIMITS_PAGE) - 4;
+            
+            if (Adapter->DsmSupported || 1)
+            {
+                if (Adapter->DsmMaxTotalLbas == 0)
+                {
+                    ULONG Unbound = 0xffffffff;
+                    REVERSE_BYTES(&Page->MaximumUnmapLBACount, &Unbound);
+                }
+                else
+                {
+                    REVERSE_BYTES(&Page->MaximumUnmapLBACount, &Adapter->DsmMaxTotalLbas);
+                }
+                
+                REVERSE_BYTES(&Page->MaximumUnmapBlockDescriptorCount, &Adapter->DsmMaxRanges);
 
-            SrbSetDataTransferLength(Srb, Needed);
+                /* Optional UNMAP performance hints */
+                /* TODO: Check if these do cleanly map between SCSI and NVMe? */
+                REVERSE_BYTES(&Page->OptimalUnmapGranularity,
+                              &Namespace->PreferredUnmapGranularity);
+                REVERSE_BYTES(&Page->UnmapGranularityAlignment,
+                              &Namespace->PreferredUnmapAlignment);
+            }
+
+            SrbSetDataTransferLength(Srb, sizeof(VPD_BLOCK_LIMITS_PAGE));
             NvmpCompleteRequest(Adapter, Srb, SRB_STATUS_SUCCESS);
             return;
         }
@@ -429,9 +453,12 @@ NvmpInquiryVpd(
             Provisioning->PageCode = VPD_LOGICAL_BLOCK_PROVISIONING;
             Provisioning->PageLength[1] = 4;
 
-            /* Deallocate is not used, so only thin provisioning is reported */
             if (Namespace->ThinProvisioning)
                 Provisioning->ProvisioningType = PROVISIONING_TYPE_THIN;
+            
+            /* UNMAP support declaration */
+            Provisioning->LBPU = Adapter->DsmSupported;
+            Provisioning->LBPRZ = Namespace->DeallocatedBlocksReadZero;
 
             SrbSetDataTransferLength(Srb, Needed);
             NvmpCompleteRequest(Adapter, Srb, SRB_STATUS_SUCCESS);
@@ -915,6 +942,9 @@ NvmpBuildScsi(
 
         case SCSIOP_SYNCHRONIZE_CACHE:
             return NvmpBuildFlush(Adapter, Srb);
+        
+        case SCSIOP_UNMAP:
+            return NvmpBuildUnmap(Adapter, Srb, Namespace, Cdb);
 
         default:
             NvmpCompleteIllegalRequest(Adapter, Srb, SRB_STATUS_INVALID_REQUEST,

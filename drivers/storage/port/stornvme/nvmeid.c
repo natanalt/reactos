@@ -3,6 +3,7 @@
  * LICENSE:     MIT (https://spdx.org/licenses/MIT)
  * PURPOSE:     Controller and namespace identification
  * COPYRIGHT:   Copyright 2026 Justin Miller <justin.miller@reactos.org>
+ *              Copyright 2026 Natalia Cholewa <natanalt@proton.me>
  */
 
 /* INCLUDES *******************************************************************/
@@ -69,6 +70,61 @@ NvmpMaximumTransfer(
     return Length;
 }
 
+/**
+ * @brief Scans the controller for exact information about DSM support.
+ * 
+ * IMPORTANT: This overwrites the scratch buffer, as an additional Identify command call is
+ * needed to get exact DSM limits.
+ */
+static
+BOOLEAN
+NvmpCheckForDsmSupport(
+    _In_ PNVME_ADAPTER_EXTENSION Adapter,
+    _In_ PNVME_IDENTIFY_CONTROLLER_DATA Data)
+{
+    PNVME_IDENTIFY_NVM_SPECIFIC_CONTROLLER_IO_COMMAND_SET DataCns06;
+    BOOLEAN DatasetManagement;
+
+    /*
+     * Simply looking at ONCS.DatasetManagement is not enough, as DSM may be enabled even if the
+     * value is 0.
+     * 
+     * If ONCS.DatasetManagement is 0, the DMRL, DMRSL and DMSL fields being nonzero indicates
+     * valid DSM support, and the absolute maximum values for these limits. If that field is 1,
+     * these limits should still be polled, but the spec implies they're just suggestions then.
+     * 
+     * Either way, we use DMRL/DMRSL/DMSL as absolute maxima, so we need to fetch them via a second
+     * Identify call.
+     */
+
+    DatasetManagement = Data->ONCS.DatasetManagement;
+
+    if (!NvmpIdentify(Adapter, 0, NVME_IDENTIFY_CNS_SPECIFIC_CONTROLLER_IO_COMMAND_SET))
+    {
+        DPRINT1("Failed to Identify CNS 06h\n");
+        return FALSE;
+    }
+    
+    DataCns06 = Adapter->ScratchBuffer;
+    
+    if (DatasetManagement || (Adapter->DsmMaxRanges != 0 &&
+        Adapter->DsmMaxLbasOnSingleRange != 0 &&
+        Adapter->DsmMaxTotalLbas != 0))
+    {
+        Adapter->DsmSupported = TRUE;
+        Adapter->DsmMaxLbasOnSingleRange = DataCns06->DMRSL;
+        Adapter->DsmMaxTotalLbas = DataCns06->DMSL;
+        
+        /* Apply our own maximum of exactly one page (256 ranges @ 4K pages) */
+        /* This is also the NVMe maximum (1 byte for NR in CD10 for the command) */
+        Adapter->DsmMaxRanges = min(DataCns06->DMRL, PAGE_SIZE / sizeof(NVME_LBA_RANGE));
+        if (Adapter->DsmMaxRanges == 0)
+            Adapter->DsmMaxRanges = (UCHAR)(PAGE_SIZE / sizeof(NVME_LBA_RANGE));
+    }
+
+    return TRUE;
+}
+
 
 BOOLEAN
 NvmpIdentifyController(
@@ -98,9 +154,16 @@ NvmpIdentifyController(
             Adapter->NamespaceCount,
             Adapter->MaximumTransferLength,
             Adapter->VolatileWriteCache ? ", with a write cache" : "");
+    
+    DPRINT1("Dataset management is %s\n", Adapter->DsmSupported ? "on" : "off");
 
     if (Adapter->NamespaceCount > NVME_MAX_NAMESPACES)
         Adapter->NamespaceCount = NVME_MAX_NAMESPACES;
+    
+    /* Check whether we have Dataset Management command support, aka TRIM or UNMAP. */
+    if (!NvmpCheckForDsmSupport(Adapter, Data))
+        return FALSE;
+    /* (old Data ScratchBuffer is now overwritten) */
 
     return TRUE;
 }
@@ -161,6 +224,28 @@ NvmpIdentifyNamespace(
     RtlCopyMemory(Namespace->Nguid, Data->NGUID, sizeof(Namespace->Nguid));
     RtlCopyMemory(Namespace->Eui64, Data->EUI64, sizeof(Namespace->Eui64));
     Namespace->Present = TRUE;
+
+    if (Adapter->DsmSupported)
+    {
+        Namespace->WriteZeroesCanDeallocate = Data->DLFEAT.WriteZeroes;
+
+        if (Data->DLFEAT.ReadBehavior == NVME_READ_BEHAVIOR_RETURN_ZERO)
+            Namespace->DeallocatedBlocksReadZero = 1;
+        
+        /* TODO: Newer NVMe specs widen this to 2 bits, where NPDG may(?)
+           behave a bit oddly */
+        if (Data->NSFEAT.NameSpaceIoOptimization != 0)
+        {
+            Namespace->PreferredUnmapGranularity = Data->NPDG + 1;
+            Namespace->PreferredUnmapAlignment = Data->NPDA + 1;
+        }
+
+        DPRINT1("Namespace %lu DSM parameters:\n", NamespaceId);
+        DPRINT1(" - DLFEAT.WriteZeros = %d\n", Data->DLFEAT.WriteZeroes);
+        DPRINT1(" - DLFEAT.ReadBehavior = %d\n", Data->DLFEAT.ReadBehavior);
+        DPRINT1(" - NPDG = %d\n", Data->NPDG);
+        DPRINT1(" - NPDA = %d\n", Data->NPDA);
+    }
 
     DPRINT1("Namespace %lu holds %I64u blocks of %lu bytes\n",
             NamespaceId, Namespace->BlockCount, Namespace->BlockSize);

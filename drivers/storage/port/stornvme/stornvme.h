@@ -3,6 +3,7 @@
  * LICENSE:     MIT (https://spdx.org/licenses/MIT)
  * PURPOSE:     Common header file
  * COPYRIGHT:   Copyright 2026 Justin Miller <justin.miller@reactos.org>
+ *              Copyright 2026 Natalia Cholewa <natanalt@proton.me>
  */
 
 #pragma once
@@ -66,6 +67,10 @@ typedef struct _NVME_NAMESPACE
     UCHAR Nguid[16];
     UCHAR Eui64[8];
     BOOLEAN ThinProvisioning;
+    BOOLEAN DeallocatedBlocksReadZero;
+    BOOLEAN WriteZeroesCanDeallocate;
+    USHORT PreferredUnmapGranularity; /* Used if != 0 */
+    USHORT PreferredUnmapAlignment; /* Used if != 0 */
     BOOLEAN Present;
 } NVME_NAMESPACE, *PNVME_NAMESPACE;
 
@@ -190,6 +195,11 @@ typedef struct _NVME_ADAPTER_EXTENSION
     UCHAR SerialNumber[20];
     UCHAR ModelNumber[40];
     UCHAR FirmwareRevision[8];
+
+    BOOLEAN DsmSupported; /* See individual namespaces for exact capabilities for TRIM */
+    UCHAR DsmMaxRanges; /* DMRL */
+    ULONG DsmMaxLbasOnSingleRange; /* DMRSL */
+    ULONGLONG DsmMaxTotalLbas; /* DMSL */
 
     /* VWC, flushes are required */
     BOOLEAN VolatileWriteCache;
@@ -384,6 +394,13 @@ BOOLEAN
 NvmpBuildFlush(
     _In_ PNVME_ADAPTER_EXTENSION Adapter,
     _In_ PVOID Srb);
+
+BOOLEAN
+NvmpBuildUnmap(
+    _In_ PNVME_ADAPTER_EXTENSION Adapter,
+    _In_ PVOID Srb,
+    _In_ PNVME_NAMESPACE Namespace,
+    _In_ PCDB Cdb);
 
 VOID
 NvmpPostCommand(

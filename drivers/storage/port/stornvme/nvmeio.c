@@ -3,6 +3,7 @@
  * LICENSE:     MIT (https://spdx.org/licenses/MIT)
  * PURPOSE:     Read, write and flush translation
  * COPYRIGHT:   Copyright 2026 Justin Miller <justin.miller@reactos.org>
+ *              Copyright 2026 Natalia Cholewa <natanalt@proton.me>
  */
 
 /* INCLUDES *******************************************************************/
@@ -223,6 +224,82 @@ NvmpBuildFlush(
     Context->Command.CDW0.OPC = NVME_NVM_COMMAND_FLUSH;
     Context->Command.NSID = (ULONG)Lun + 1;
 
+    return TRUE;
+}
+
+/**
+ * @brief Builds an NVM Dataset Management Deallocation
+ *
+ * @return TRUE if the request is ready to post, FALSE if it was already completed.
+ */
+BOOLEAN
+NvmpBuildUnmap(
+    _In_ PNVME_ADAPTER_EXTENSION Adapter,
+    _In_ PVOID Srb,
+    _In_ PNVME_NAMESPACE Namespace,
+    _In_ PCDB Cdb)
+{
+    /* TODO: Maybe using Write Zeroes with Deallocate would also work here?  */
+
+    PNVME_REQUEST_CONTEXT Context = SrbGetMiniportContext(Srb);
+    USHORT ParameterListLength;
+    USHORT ParameterListEntries;
+    PVOID Data;
+    PUNMAP_LIST_HEADER ListHeader;
+    PUNMAP_BLOCK_DESCRIPTOR BlockDescriptors;
+    PNVME_LBA_RANGE NvmeRanges;
+    STOR_PHYSICAL_ADDRESS PhysicalAddress;
+    ULONG BytesMapped;
+    UCHAR Lun;
+
+    if (Cdb->UNMAP.Anchor)
+    {
+        DPRINT("UNMAP LBA anchoring is unsupported\n");
+        NvmpCompleteRequest(Adapter, Srb, SRB_STATUS_INVALID_REQUEST);
+        return FALSE;
+    }
+    
+    Data = SrbGetDataBuffer(Srb);
+    ListHeader = Data;
+    BlockDescriptors = (PVOID)((size_t)Data + 8);
+
+    NvmeRanges = NvmpContextPage(Context);
+    RtlZeroMemory(NvmeRanges, PAGE_SIZE);
+
+    /* TODO: Clean this up, add sanity checks, etc. */
+
+    REVERSE_BYTES_SHORT(&ParameterListLength, &Cdb->UNMAP.AllocationLength);
+    ParameterListEntries = ParameterListLength / sizeof(UNMAP_BLOCK_DESCRIPTOR);
+    NT_ASSERT(ParameterListEntries <= 256); /* described in one of the EVPDs */
+    
+    if (ParameterListEntries == 0)
+    {
+        /* No entries, no unmapping */
+        NvmpCompleteRequest(Adapter, Srb, SRB_STATUS_SUCCESS);
+        return FALSE;
+    }
+    
+    SrbGetPathTargetLun(Srb, NULL, NULL, &Lun);
+
+    DPRINT("LUN %d, scheduling a TRIM\n", Lun);
+
+    for (int i = 0; i < ParameterListEntries; i++)
+    {
+        REVERSE_BYTES_QUAD(&NvmeRanges[i].StartingLBA, BlockDescriptors[i].StartingLba);
+        REVERSE_BYTES(&NvmeRanges[i].LogicalBlockCount, BlockDescriptors[i].LbaCount);
+        NvmeRanges[i].Attributes.AsUlong = 0;
+        DPRINT1(" - %d: Start LBA %llx, len %llx\n", i, NvmeRanges[i].StartingLBA, NvmeRanges[i].LogicalBlockCount);
+    }
+
+    PhysicalAddress = StorPortGetPhysicalAddress(Adapter, Srb, NvmeRanges, &BytesMapped);
+
+    Context->Command.CDW0.OPC = NVME_NVM_COMMAND_DATASET_MANAGEMENT;
+    Context->Command.NSID = (ULONG)Lun + 1;
+    Context->Command.PRP1 = PhysicalAddress.QuadPart;
+    Context->Command.u.DATASETMANAGEMENT.CDW10.NR = ParameterListEntries - 1;
+    Context->Command.u.DATASETMANAGEMENT.CDW11.AD = 1; /* Set Deallocate */
+    
+    // __debugbreak();
     return TRUE;
 }
 
