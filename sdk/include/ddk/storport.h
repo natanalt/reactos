@@ -3388,6 +3388,17 @@ typedef union _CDB
         UCHAR Reserved2[5];
         UCHAR Control;
     } SET_CD_SPEED, *PSET_CD_SPEED;
+    struct _UNMAP
+    {
+        UCHAR OperationCode;
+        UCHAR Anchor:1;
+        UCHAR Reserved1:7;
+        UCHAR Reserved2[4];
+        UCHAR GroupNumber:5;
+        UCHAR Reserved3:3;
+        UCHAR AllocationLength[2];
+        UCHAR Control;
+    } UNMAP, *PUNMAP;
     struct _READ12
     {
         UCHAR OperationCode;
